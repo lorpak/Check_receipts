@@ -1,0 +1,11 @@
+C:\Users\Я\Desktop\Check_receipts\local\src-tauri\target\release\deps\tauri_macros-6cefe6f9b1f2834b.d: C:\Users\Я\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tauri-macros-1.4.7\src\lib.rs C:\Users\Я\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tauri-macros-1.4.7\src\command\mod.rs C:\Users\Я\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tauri-macros-1.4.7\src\command\handler.rs C:\Users\Я\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tauri-macros-1.4.7\src\command\wrapper.rs C:\Users\Я\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tauri-macros-1.4.7\src\command_module.rs C:\Users\Я\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tauri-macros-1.4.7\src\runtime.rs C:\Users\Я\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tauri-macros-1.4.7\src\context.rs
+
+C:\Users\Я\Desktop\Check_receipts\local\src-tauri\target\release\deps\tauri_macros-6cefe6f9b1f2834b.dll: C:\Users\Я\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tauri-macros-1.4.7\src\lib.rs C:\Users\Я\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tauri-macros-1.4.7\src\command\mod.rs C:\Users\Я\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tauri-macros-1.4.7\src\command\handler.rs C:\Users\Я\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tauri-macros-1.4.7\src\command\wrapper.rs C:\Users\Я\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tauri-macros-1.4.7\src\command_module.rs C:\Users\Я\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tauri-macros-1.4.7\src\runtime.rs C:\Users\Я\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tauri-macros-1.4.7\src\context.rs
+
+C:\Users\Я\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tauri-macros-1.4.7\src\lib.rs:
+C:\Users\Я\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tauri-macros-1.4.7\src\command\mod.rs:
+C:\Users\Я\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tauri-macros-1.4.7\src\command\handler.rs:
+C:\Users\Я\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tauri-macros-1.4.7\src\command\wrapper.rs:
+C:\Users\Я\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tauri-macros-1.4.7\src\command_module.rs:
+C:\Users\Я\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tauri-macros-1.4.7\src\runtime.rs:
+C:\Users\Я\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tauri-macros-1.4.7\src\context.rs:
