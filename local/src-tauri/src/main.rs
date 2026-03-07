@@ -16,18 +16,54 @@ struct AppState {
   last_status_file: Mutex<Option<String>>,
 }
 
-fn resolve_app_py() -> Result<PathBuf, String> {
-  let mut dir = std::env::current_dir().map_err(|e| e.to_string())?;
-  for _ in 0..6 {
-    let candidate = dir.join("app.py");
-    if candidate.exists() {
-      return Ok(candidate);
-    }
-    if !dir.pop() {
-      break;
+fn resolve_app_py(app: &AppHandle) -> Result<PathBuf, String> {
+  let mut candidates: Vec<PathBuf> = Vec::new();
+
+  if let Some(resource_dir) = tauri::api::path::resource_dir(app.package_info(), &app.env()) {
+    candidates.push(resource_dir.join("app.py"));
+    candidates.push(resource_dir.join("_up_").join("app.py"));
+  }
+
+  if let Ok(cwd) = std::env::current_dir() {
+    let mut dir = cwd;
+    for _ in 0..6 {
+      candidates.push(dir.join("app.py"));
+      candidates.push(dir.join("resources").join("app.py"));
+      candidates.push(dir.join("_up_").join("app.py"));
+      candidates.push(dir.join("_up_").join("resources").join("app.py"));
+      if !dir.pop() {
+        break;
+      }
     }
   }
-  Err("Не найден app.py рядом с приложением".to_string())
+
+  if let Ok(exe) = std::env::current_exe() {
+    if let Some(mut dir) = exe.parent().map(|p| p.to_path_buf()) {
+      for _ in 0..8 {
+        candidates.push(dir.join("app.py"));
+        candidates.push(dir.join("resources").join("app.py"));
+        candidates.push(dir.join("_up_").join("app.py"));
+        candidates.push(dir.join("_up_").join("resources").join("app.py"));
+        if !dir.pop() {
+          break;
+        }
+      }
+    }
+  }
+
+  for path in &candidates {
+    if path.exists() {
+      return Ok(path.clone());
+    }
+  }
+
+  let checked = candidates
+    .iter()
+    .map(|p| p.to_string_lossy().to_string())
+    .collect::<Vec<_>>()
+    .join("; ");
+
+  Err(format!("Не найден app.py. Проверено: {}", checked))
 }
 
 fn resolve_python_exe(app: &AppHandle) -> Result<PathBuf, String> {
@@ -35,6 +71,14 @@ fn resolve_python_exe(app: &AppHandle) -> Result<PathBuf, String> {
 
   if let Some(resource_dir) = tauri::api::path::resource_dir(app.package_info(), &app.env()) {
     candidates.push(resource_dir.join("python").join("python.exe"));
+    candidates.push(resource_dir.join("resources").join("python").join("python.exe"));
+    candidates.push(
+      resource_dir
+        .join("_up_")
+        .join("resources")
+        .join("python")
+        .join("python.exe"),
+    );
   }
 
   let rel = PathBuf::from("resources").join("python").join("python.exe");
@@ -43,6 +87,7 @@ fn resolve_python_exe(app: &AppHandle) -> Result<PathBuf, String> {
     let mut dir = cwd;
     for _ in 0..6 {
       candidates.push(dir.join(&rel));
+      candidates.push(dir.join("_up_").join(&rel));
       if !dir.pop() {
         break;
       }
@@ -53,6 +98,7 @@ fn resolve_python_exe(app: &AppHandle) -> Result<PathBuf, String> {
     if let Some(mut dir) = exe.parent().map(|p| p.to_path_buf()) {
       for _ in 0..8 {
         candidates.push(dir.join(&rel));
+        candidates.push(dir.join("_up_").join(&rel));
         if !dir.pop() {
           break;
         }
@@ -90,12 +136,22 @@ fn resolve_site_packages_dirs(app: &AppHandle) -> Vec<PathBuf> {
 
   if let Some(resource_dir) = tauri::api::path::resource_dir(app.package_info(), &app.env()) {
     dirs.push(resource_dir.join("python").join("Lib").join("site-packages"));
+    dirs.push(resource_dir.join("resources").join("python").join("Lib").join("site-packages"));
+    dirs.push(
+      resource_dir
+        .join("_up_")
+        .join("resources")
+        .join("python")
+        .join("Lib")
+        .join("site-packages"),
+    );
   }
 
   if let Ok(cwd) = std::env::current_dir() {
     let mut dir = cwd;
     for _ in 0..6 {
       dirs.push(dir.join(&rel_site));
+      dirs.push(dir.join("_up_").join(&rel_site));
       if !dir.pop() {
         break;
       }
@@ -106,6 +162,7 @@ fn resolve_site_packages_dirs(app: &AppHandle) -> Vec<PathBuf> {
     if let Some(mut dir) = exe.parent().map(|p| p.to_path_buf()) {
       for _ in 0..8 {
         dirs.push(dir.join(&rel_site));
+        dirs.push(dir.join("_up_").join(&rel_site));
         if !dir.pop() {
           break;
         }
@@ -118,7 +175,7 @@ fn resolve_site_packages_dirs(app: &AppHandle) -> Vec<PathBuf> {
 
 #[tauri::command]
 fn start_processing(payload: String, app: AppHandle, state: State<AppState>) -> Result<String, String> {
-  let app_py = resolve_app_py()?;
+  let app_py = resolve_app_py(&app)?;
   let temp_dir = std::env::temp_dir();
   let ts = SystemTime::now()
     .duration_since(UNIX_EPOCH)

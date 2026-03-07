@@ -256,6 +256,69 @@ button:disabled {
     filter: brightness(0.92);
 }
 
+.source-split {
+    display: inline-grid;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: stretch;
+    width: 230px;
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--accent);
+    color: #fff;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    font-weight: 600;
+    box-shadow: none;
+    transition: filter 0.3s, transform 0.3s, box-shadow 0.3s;
+}
+
+.source-split:hover {
+    filter: brightness(0.92);
+    transform: translateY(-2px);
+    box-shadow: 0 5px 15px rgba(0,0,0,0.22);
+}
+
+.source-split:focus-within {
+    outline: 2px solid rgba(255, 255, 255, 0.28);
+    outline-offset: 2px;
+}
+
+.source-split-btn {
+    background: transparent;
+    color: inherit;
+    border: none;
+    border-radius: 0;
+    padding: 12px 10px;
+    font-size: 16px;
+    font-weight: inherit;
+    text-transform: inherit;
+    letter-spacing: inherit;
+    cursor: pointer;
+    transition: background-color 0.2s;
+}
+
+.source-split-btn:hover {
+    background: rgba(255, 255, 255, 0.08);
+    transform: none;
+    box-shadow: none;
+}
+
+.source-split-btn:active {
+    background: rgba(0, 0, 0, 0.12);
+    transform: none;
+}
+
+.source-split-divider {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    pointer-events: none;
+    font-size: 18px;
+    font-weight: 700;
+    line-height: 1;
+}
+
 .btn-secondary {
     background: var(--button-secondary);
     color: white;
@@ -399,6 +462,10 @@ button:disabled {
     }
 
     .input-group input {
+        width: 100%;
+    }
+
+    .source-split {
         width: 100%;
     }
 }

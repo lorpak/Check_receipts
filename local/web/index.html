@@ -22,10 +22,14 @@
                 <div class="input-group">
                     <label for="sourceFolderPath">Папка или файл с исходными данными:</label>
                     <input type="text" id="sourceFolderPath" placeholder="C:\Путь\к\папке\с\данными">
-                    <button class="btn-primary" onclick="selectSource()">Выбрать источник</button>
+                    <div class="source-split" role="group" aria-label="Выбор источника">
+                        <button class="source-split-btn" onclick="selectSourceFile()" type="button">Файл</button>
+                        <span class="source-split-divider" aria-hidden="true">/</span>
+                        <button class="source-split-btn" onclick="selectSourceFolder()" type="button">Папка</button>
+                    </div>
                 </div>
                 <p class="input-hint">
-                    Одна кнопка выбора: можно выбрать либо XML-файл, либо одну/несколько папок. Для нескольких путей можно отредактировать поле вручную через <code>;</code>.
+                    Блок выбора источника работает как одна кнопка с двумя зонами: <b>Файл</b> и <b>Папка</b>. Для нескольких путей можно отредактировать поле вручную через <code>;</code>.
                 </p>
 
                 <div class="input-group">
@@ -101,7 +105,7 @@
         </div>
     </div>
 
-    <script src="script.js?v=20260303"></script>
+    <script src="script.js?v=20260308"></script>
 </body>
 </html>
 

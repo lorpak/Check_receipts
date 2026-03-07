@@ -236,14 +236,11 @@ async function selectFolder(title, inputId, selectionType = 'folder') {
     }
 }
 
-function selectSource() {
-    const pickFile = window.confirm(
-        'Выбрать один XML-файл?\n\nНажмите "ОК" для выбора файла.\nНажмите "Отмена" для выбора папки/папок.'
-    );
-    if (pickFile) {
-        selectFolder('Выберите XML-файл для точечной обработки', 'sourceFolderPath', 'file');
-        return;
-    }
+function selectSourceFile() {
+    selectFolder('Выберите XML-файл для точечной обработки', 'sourceFolderPath', 'file');
+}
+
+function selectSourceFolder() {
     selectFolder('Выберите одну или несколько папок', 'sourceFolderPath', 'multi_folder');
 }
 
@@ -462,7 +459,8 @@ function clearResults() {
     showNotification('Результаты очищены', 'info');
 }
 
-window.selectSource = selectSource;
+window.selectSourceFile = selectSourceFile;
+window.selectSourceFolder = selectSourceFolder;
 window.selectOutputFolder = selectOutputFolder;
 window.setToday = setToday;
 window.setYesterday = setYesterday;

@@ -2,7 +2,7 @@
   "build": {
     "beforeBuildCommand": "",
     "beforeDevCommand": "python -m http.server 4173 -d web",
-    "devPath": "http://127.0.0.1:4173/index.html?v=20260303",
+    "devPath": "http://127.0.0.1:4173/index.html?v=20260308",
     "distDir": "../web",
     "withGlobalTauri": true
   },
@@ -34,7 +34,8 @@
       ],
       "resources": [
         "../app.py",
-        "../check_receipts.py",
+        "../check_receipts/**",
+        "../orchestration/**",
         "../resources/python/**"
       ]
     },
