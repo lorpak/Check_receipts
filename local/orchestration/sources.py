@@ -102,6 +102,7 @@ def find_matching_response_for_report(report_file: str, responses_folder: str = 
     candidate_dirs.append(report_dir)
 
     parent_dir = os.path.dirname(report_dir)
+    response_tokens = [token.lower() for token in RESPONSE_DIR_CANDIDATES if token]
     for base in (report_dir, parent_dir):
         if not base or not os.path.isdir(base):
             continue
@@ -109,6 +110,17 @@ def find_matching_response_for_report(report_file: str, responses_folder: str = 
             candidate = os.path.join(base, folder_name)
             if os.path.isdir(candidate):
                 candidate_dirs.append(os.path.abspath(candidate))
+        # Support custom folder names like "Отбивки ЭКС".
+        try:
+            for name in os.listdir(base):
+                full_path = os.path.join(base, name)
+                if not os.path.isdir(full_path):
+                    continue
+                low_name = name.lower()
+                if any(token in low_name for token in response_tokens):
+                    candidate_dirs.append(os.path.abspath(full_path))
+        except Exception:
+            pass
 
     seen = set()
     unique_dirs = []
