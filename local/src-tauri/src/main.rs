@@ -68,10 +68,22 @@ fn resolve_app_py(app: &AppHandle) -> Result<PathBuf, String> {
 
 fn resolve_python_exe(app: &AppHandle) -> Result<PathBuf, String> {
   let mut candidates: Vec<PathBuf> = Vec::new();
+  let rel = PathBuf::from("resources").join("python").join("python.exe");
+  let rel_nested = PathBuf::from("resources")
+    .join("resources")
+    .join("python")
+    .join("python.exe");
 
   if let Some(resource_dir) = tauri::api::path::resource_dir(app.package_info(), &app.env()) {
     candidates.push(resource_dir.join("python").join("python.exe"));
     candidates.push(resource_dir.join("resources").join("python").join("python.exe"));
+    candidates.push(
+      resource_dir
+        .join("resources")
+        .join("resources")
+        .join("python")
+        .join("python.exe"),
+    );
     candidates.push(
       resource_dir
         .join("_up_")
@@ -79,15 +91,23 @@ fn resolve_python_exe(app: &AppHandle) -> Result<PathBuf, String> {
         .join("python")
         .join("python.exe"),
     );
+    candidates.push(
+      resource_dir
+        .join("_up_")
+        .join("resources")
+        .join("resources")
+        .join("python")
+        .join("python.exe"),
+    );
   }
-
-  let rel = PathBuf::from("resources").join("python").join("python.exe");
 
   if let Ok(cwd) = std::env::current_dir() {
     let mut dir = cwd;
     for _ in 0..6 {
       candidates.push(dir.join(&rel));
+      candidates.push(dir.join(&rel_nested));
       candidates.push(dir.join("_up_").join(&rel));
+      candidates.push(dir.join("_up_").join(&rel_nested));
       if !dir.pop() {
         break;
       }
@@ -98,7 +118,9 @@ fn resolve_python_exe(app: &AppHandle) -> Result<PathBuf, String> {
     if let Some(mut dir) = exe.parent().map(|p| p.to_path_buf()) {
       for _ in 0..8 {
         candidates.push(dir.join(&rel));
+        candidates.push(dir.join(&rel_nested));
         candidates.push(dir.join("_up_").join(&rel));
+        candidates.push(dir.join("_up_").join(&rel_nested));
         if !dir.pop() {
           break;
         }
@@ -133,13 +155,35 @@ fn resolve_site_packages_dirs(app: &AppHandle) -> Vec<PathBuf> {
     .join("python")
     .join("Lib")
     .join("site-packages");
+  let rel_site_nested = PathBuf::from("resources")
+    .join("resources")
+    .join("python")
+    .join("Lib")
+    .join("site-packages");
 
   if let Some(resource_dir) = tauri::api::path::resource_dir(app.package_info(), &app.env()) {
     dirs.push(resource_dir.join("python").join("Lib").join("site-packages"));
     dirs.push(resource_dir.join("resources").join("python").join("Lib").join("site-packages"));
     dirs.push(
       resource_dir
+        .join("resources")
+        .join("resources")
+        .join("python")
+        .join("Lib")
+        .join("site-packages"),
+    );
+    dirs.push(
+      resource_dir
         .join("_up_")
+        .join("resources")
+        .join("python")
+        .join("Lib")
+        .join("site-packages"),
+    );
+    dirs.push(
+      resource_dir
+        .join("_up_")
+        .join("resources")
         .join("resources")
         .join("python")
         .join("Lib")
@@ -151,7 +195,9 @@ fn resolve_site_packages_dirs(app: &AppHandle) -> Vec<PathBuf> {
     let mut dir = cwd;
     for _ in 0..6 {
       dirs.push(dir.join(&rel_site));
+      dirs.push(dir.join(&rel_site_nested));
       dirs.push(dir.join("_up_").join(&rel_site));
+      dirs.push(dir.join("_up_").join(&rel_site_nested));
       if !dir.pop() {
         break;
       }
@@ -162,7 +208,9 @@ fn resolve_site_packages_dirs(app: &AppHandle) -> Vec<PathBuf> {
     if let Some(mut dir) = exe.parent().map(|p| p.to_path_buf()) {
       for _ in 0..8 {
         dirs.push(dir.join(&rel_site));
+        dirs.push(dir.join(&rel_site_nested));
         dirs.push(dir.join("_up_").join(&rel_site));
+        dirs.push(dir.join("_up_").join(&rel_site_nested));
         if !dir.pop() {
           break;
         }
