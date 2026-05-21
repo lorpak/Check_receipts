@@ -24,8 +24,17 @@ from .domain import (
     process_pairs_parallel_optimized,
     process_pairs_processpool,
     worker_process_main,
+    scan_report_response_matches,
 )
-from .service import _add_client_info_ultrafast, main_with_date, save_errors_to_excel
+from .service import (
+    _add_client_info_ultrafast,
+    filter_scan_result_by_dates,
+    main_with_date,
+    reconcile_reports_receipts,
+    save_errors_to_excel,
+    save_missing_receipts_to_excel,
+    save_reconciliation_to_excel,
+)
 
 __all__ = [
     "ERROR_CACHE",
@@ -51,6 +60,11 @@ __all__ = [
     "parse_xml_direct",
     "process_pairs_parallel_optimized",
     "process_pairs_processpool",
+    "reconcile_reports_receipts",
+    "save_missing_receipts_to_excel",
+    "save_reconciliation_to_excel",
+    "scan_report_response_matches",
     "save_errors_to_excel",
+    "filter_scan_result_by_dates",
     "worker_process_main",
 ]

@@ -1,7 +1,11 @@
 __pycache__/
 *.pyc
+.codex_deps/
+.pytest_cache/
 .venv/
 env/
+deps/
+.vscode/
 node_modules/
 dist/
 build/

@@ -46,7 +46,6 @@ def _import_process_payload():
         from orchestration.payload_handler import process_payload as fn
         return fn
     except ModuleNotFoundError as exc:
-        # Fallback for bundled _up_ where only __pycache__ (*.pyc) can be present.
         if not str(exc).startswith("No module named 'orchestration"):
             raise
 

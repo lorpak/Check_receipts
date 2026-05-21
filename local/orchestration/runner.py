@@ -18,6 +18,90 @@ def cleanup_caches():
         pass
 
 
+def run_combined_reconciliation_sources(
+    sources,
+    output_folder: str,
+    selected_dates,
+    reports_folder: str = None,
+    responses_folder: str = None,
+    status_file: str | None = None,
+):
+    from check_receipts.domain import PairScanResult, _resolve_input_dirs, scan_report_response_matches
+    from check_receipts.service import filter_scan_result_by_dates, save_reconciliation_to_excel
+
+    aggregate = PairScanResult()
+    source_errors = []
+    source_diagnostics = []
+    total_sources = max(1, len(sources))
+
+    os.makedirs(output_folder, exist_ok=True)
+
+    for idx, source_folder in enumerate(sources):
+        source_abs = os.path.abspath(source_folder)
+        process_source = source_abs
+        process_reports = reports_folder
+        process_responses = responses_folder
+        temp_workspace = None
+
+        try:
+            cl_reports, cl_receipts = resolve_creditline_reports_receipts(source_abs)
+            if cl_reports and cl_receipts and not os.path.isfile(source_abs):
+                process_reports = cl_reports
+                process_responses = cl_receipts
+
+            if os.path.isfile(source_abs):
+                temp_workspace, process_reports, process_responses = prepare_single_file_workspace(
+                    source_abs,
+                    responses_folder=responses_folder,
+                )
+                process_source = temp_workspace
+
+            reports_dir, responses_dir = _resolve_input_dirs(process_source, process_reports, process_responses)
+            scan_result = scan_report_response_matches(reports_dir, responses_dir, include_unmatched_responses=True)
+            scan_result = filter_scan_result_by_dates(
+                scan_result,
+                selected_dates,
+                include_unmatched_responses=True,
+            )
+
+            aggregate.pairs.extend(scan_result.pairs)
+            aggregate.reports_without_response.extend(scan_result.reports_without_response)
+            aggregate.responses_without_report.extend(scan_result.responses_without_report)
+            aggregate.duplicate_responses.extend(scan_result.duplicate_responses)
+
+            source_diagnostics.append(
+                {
+                    "source": source_abs,
+                    "stats": {
+                        "mode": "reconciliation",
+                        "input_dir": process_source,
+                        "reports_dir": reports_dir,
+                        "responses_dir": responses_dir,
+                        "pairs_found": len(scan_result.pairs),
+                        "pairs_after_date_filter": len(scan_result.pairs),
+                        "reports_without_response": len(scan_result.reports_without_response),
+                        "responses_without_report": len(scan_result.responses_without_report),
+                    },
+                }
+            )
+        except Exception as e:
+            source_errors.append({"source": source_abs, "error": str(e)})
+            source_diagnostics.append({"source": source_abs, "error": str(e), "stats": {}})
+        finally:
+            if temp_workspace:
+                try:
+                    shutil.rmtree(temp_workspace, ignore_errors=True)
+                except Exception:
+                    pass
+
+        processing_status["progress"] = int(((idx + 1) / total_sources) * 90)
+        processing_status["message"] = f"[{idx + 1}/{total_sources}] Сверка источников"
+        write_status(status_file)
+
+    created_files = save_reconciliation_to_excel(aggregate, output_folder)
+    return created_files, source_errors, source_diagnostics
+
+
 def run_single_source_task(
     source_folder: str,
     output_folder: str,
@@ -25,6 +109,8 @@ def run_single_source_task(
     event_type: str,
     reports_folder: str = None,
     responses_folder: str = None,
+    thread_workers: int = None,
+    mode: str = "errors",
 ):
     """
     Worker for top-level parallelism: process one source and return JSON-serializable result.
@@ -37,7 +123,7 @@ def run_single_source_task(
 
     try:
         import check_receipts
-        from check_receipts import main_with_date
+        from check_receipts import main_with_date, reconcile_reports_receipts
 
         cl_reports, cl_receipts = resolve_creditline_reports_receipts(source_abs)
         if cl_reports and cl_receipts and not os.path.isfile(source_abs):
@@ -51,15 +137,25 @@ def run_single_source_task(
             )
             process_source = temp_workspace
 
-        result_files = main_with_date(
-            process_source,
-            selected_dates,
-            event_type,
-            progress_callback=None,
-            output_folder=output_folder,
-            reports_folder=process_reports,
-            responses_folder=process_responses,
-        )
+        if (mode or "errors").lower() == "reconciliation":
+            result_files = reconcile_reports_receipts(
+                process_source,
+                selected_dates,
+                output_folder=output_folder,
+                reports_folder=process_reports,
+                responses_folder=process_responses,
+            )
+        else:
+            result_files = main_with_date(
+                process_source,
+                selected_dates,
+                event_type,
+                progress_callback=None,
+                output_folder=output_folder,
+                reports_folder=process_reports,
+                responses_folder=process_responses,
+                thread_workers=thread_workers,
+            )
         return {
             "source": source_abs,
             "result_files": result_files or [],
@@ -96,6 +192,8 @@ def run_processing(
     reports_folder: str = None,
     responses_folder: str = None,
     status_file: str | None = None,
+    thread_workers: int = None,
+    mode: str = "errors",
 ):
     cleanup_caches()
 
@@ -114,7 +212,7 @@ def run_processing(
 
     try:
         import check_receipts
-        from check_receipts import main_with_date
+        from check_receipts import main_with_date, reconcile_reports_receipts
 
         sources = source_entries if isinstance(source_entries, list) else [source_entries]
         sources = [os.path.abspath(s) for s in sources if s]
@@ -124,7 +222,20 @@ def run_processing(
         source_errors = []
         source_diagnostics = []
 
-        if total_sources > 1:
+        if total_sources > 1 and (mode or "errors").lower() == "reconciliation":
+            processing_status["message"] = f"Сверка источников: {total_sources}"
+            processing_status["progress"] = 0
+            write_status(status_file)
+            created_files, source_errors, source_diagnostics = run_combined_reconciliation_sources(
+                sources,
+                output_folder,
+                selected_dates,
+                reports_folder,
+                responses_folder,
+                status_file=status_file,
+            )
+            all_result_files.extend(created_files)
+        elif total_sources > 1:
             max_parallel_sources = min(total_sources, max(1, os.cpu_count() or 2), 3)
             processing_status["message"] = (
                 f"Параллельная обработка источников: {total_sources} (workers={max_parallel_sources})"
@@ -143,6 +254,8 @@ def run_processing(
                         event_type,
                         reports_folder,
                         responses_folder,
+                        thread_workers,
+                        mode,
                     )
                     futures_map[fut] = source_folder
 
@@ -205,15 +318,27 @@ def run_processing(
                         )
                         process_source = temp_workspace
 
-                    result_files = main_with_date(
-                        process_source,
-                        process_dates,
-                        event_type,
-                        update_progress,
-                        output_folder=output_folder,
-                        reports_folder=process_reports,
-                        responses_folder=process_responses,
-                    )
+                    if (mode or "errors").lower() == "reconciliation":
+                        update_progress(5, "Сверка отчетов и отбивок...")
+                        result_files = reconcile_reports_receipts(
+                            process_source,
+                            process_dates,
+                            output_folder=output_folder,
+                            reports_folder=process_reports,
+                            responses_folder=process_responses,
+                        )
+                        update_progress(100, "Сверка завершена")
+                    else:
+                        result_files = main_with_date(
+                            process_source,
+                            process_dates,
+                            event_type,
+                            update_progress,
+                            output_folder=output_folder,
+                            reports_folder=process_reports,
+                            responses_folder=process_responses,
+                            thread_workers=thread_workers,
+                        )
                     all_result_files.extend(result_files or [])
                     source_diagnostics.append(
                         {

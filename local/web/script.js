@@ -28,6 +28,8 @@ document.addEventListener('DOMContentLoaded', function () {
     window.selectedSourcePaths = [];
     window.selectedSourceType = 'folder';
     restoreSavedPaths();
+    restoreThreadWorkers();
+    restoreProcessMode();
     setupEventListeners();
 });
 
@@ -64,6 +66,8 @@ function setupEventListeners() {
     const endDateInput = document.getElementById('endDate');
     const sourceInput = document.getElementById('sourceFolderPath');
     const outputInput = document.getElementById('outputFolderPath');
+    const workersSelect = document.getElementById('threadWorkers');
+    const modeInputs = document.querySelectorAll('input[name="processMode"]');
 
     if (startDateInput && endDateInput) {
         startDateInput.addEventListener('change', updateDateRange);
@@ -91,6 +95,12 @@ function setupEventListeners() {
     if (outputInput) {
         outputInput.addEventListener('input', persistPaths);
     }
+    if (workersSelect) {
+        workersSelect.addEventListener('change', persistThreadWorkers);
+    }
+    modeInputs.forEach(input => {
+        input.addEventListener('change', persistProcessMode);
+    });
 }
 
 function updateDateRange() {
@@ -118,6 +128,18 @@ function toggleFilters(disable) {
     eventInputs.forEach(input => {
         input.disabled = disable;
     });
+}
+
+function applyProcessMode(mode) {
+    const normalizedMode = mode === 'reconciliation' ? 'reconciliation' : 'errors';
+    const eventSection = document.getElementById('eventTypeSection');
+    const processBtn = document.getElementById('processBtn');
+    if (eventSection) {
+        eventSection.style.display = normalizedMode === 'reconciliation' ? 'none' : '';
+    }
+    if (processBtn) {
+        processBtn.textContent = normalizedMode === 'reconciliation' ? 'Выполнить сверку' : 'Обработать файлы';
+    }
 }
 
 function toggleDateSection(hide) {
@@ -163,6 +185,54 @@ function persistPaths() {
         localStorage.setItem('outputPath', outputInput.value.trim());
     }
     localStorage.setItem('sourceType', window.selectedSourceType || 'folder');
+}
+
+function restoreThreadWorkers() {
+    const workersSelect = document.getElementById('threadWorkers');
+    if (!workersSelect) {
+        return;
+    }
+    const savedWorkers = localStorage.getItem('threadWorkers') || 'auto';
+    const values = Array.from(workersSelect.options).map(option => option.value);
+    workersSelect.value = values.includes(savedWorkers) ? savedWorkers : 'auto';
+}
+
+function restoreProcessMode() {
+    const savedMode = localStorage.getItem('processMode') || 'errors';
+    const normalizedMode = savedMode === 'reconciliation' ? 'reconciliation' : 'errors';
+    const input = document.querySelector(`input[name="processMode"][value="${normalizedMode}"]`);
+    if (input) {
+        input.checked = true;
+    }
+    applyProcessMode(normalizedMode);
+}
+
+function persistProcessMode() {
+    const mode = getProcessMode();
+    localStorage.setItem('processMode', mode);
+    applyProcessMode(mode);
+}
+
+function getProcessMode() {
+    const selected = document.querySelector('input[name="processMode"]:checked');
+    return selected && selected.value === 'reconciliation' ? 'reconciliation' : 'errors';
+}
+
+function persistThreadWorkers() {
+    const workersSelect = document.getElementById('threadWorkers');
+    if (workersSelect) {
+        localStorage.setItem('threadWorkers', workersSelect.value || 'auto');
+    }
+}
+
+function getThreadWorkersSelection() {
+    const workersSelect = document.getElementById('threadWorkers');
+    const value = workersSelect ? workersSelect.value : 'auto';
+    if (value === 'auto') {
+        return null;
+    }
+    const workers = Number.parseInt(value, 10);
+    return Number.isFinite(workers) && workers > 0 ? workers : null;
 }
 function setLast3Days() {
     const today = new Date();
@@ -286,6 +356,7 @@ async function startProcessing() {
     const startDate = document.getElementById('startDate').value;
     const endDate = document.getElementById('endDate').value;
     const eventType = document.querySelector('input[name="eventType"]:checked').value;
+    const processMode = getProcessMode();
     const isFileSelection = window.selectedSourceType === 'file';
 
     const validationError = validateBeforeStart();
@@ -312,6 +383,8 @@ async function startProcessing() {
             start_date: isFileSelection ? (startDate || today) : startDate,
             end_date: isFileSelection ? (endDate || today) : endDate,
             event_type: isFileSelection ? 'all' : eventType,
+            mode: processMode,
+            thread_workers: getThreadWorkersSelection(),
         };
 
         const statusFile = await invoke('start_processing', { payload: JSON.stringify(payload) });
@@ -423,13 +496,90 @@ function showResults(status) {
         hint.textContent = 'Файлы автоматически открываются после создания и сохраняются в целевой папке.';
         resultFiles.appendChild(hint);
     }
+
+    renderTimingSummary(status, resultFiles);
+}
+
+function getPathName(path) {
+    if (!path) {
+        return 'Источник';
+    }
+    const parts = String(path).split(/[\\/]+/).filter(Boolean);
+    return parts.length ? parts[parts.length - 1] : String(path);
+}
+
+function formatTimerValue(value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) {
+        return String(value);
+    }
+    return numeric.toFixed(3) + 's';
+}
+
+function appendTimerList(parent, timers) {
+    const list = document.createElement('ul');
+    Object.keys(timers).sort().forEach(key => {
+        const item = document.createElement('li');
+        const name = document.createElement('span');
+        name.textContent = key;
+        const value = document.createElement('strong');
+        value.textContent = formatTimerValue(timers[key]);
+        item.appendChild(name);
+        item.appendChild(value);
+        list.appendChild(item);
+    });
+    parent.appendChild(list);
+}
+
+function renderTimingSummary(status, container) {
+    const diagnostics = status && status.diagnostics ? status.diagnostics : {};
+    const timerGroups = [];
+
+    if (Array.isArray(diagnostics.sources)) {
+        diagnostics.sources.forEach(sourceInfo => {
+            const stats = sourceInfo && sourceInfo.stats ? sourceInfo.stats : {};
+            if (stats.timers && Object.keys(stats.timers).length > 0) {
+                timerGroups.push({
+                    title: getPathName(sourceInfo.source),
+                    timers: stats.timers,
+                });
+            }
+        });
+    } else if (diagnostics.timers && Object.keys(diagnostics.timers).length > 0) {
+        timerGroups.push({
+            title: 'Обработка',
+            timers: diagnostics.timers,
+        });
+    }
+
+    if (timerGroups.length === 0) {
+        return;
+    }
+
+    const wrapper = document.createElement('div');
+    wrapper.className = 'timers-summary';
+
+    const title = document.createElement('h3');
+    title.textContent = 'Время по этапам:';
+    wrapper.appendChild(title);
+
+    timerGroups.forEach(group => {
+        if (timerGroups.length > 1) {
+            const groupTitle = document.createElement('h4');
+            groupTitle.textContent = group.title;
+            wrapper.appendChild(groupTitle);
+        }
+        appendTimerList(wrapper, group.timers);
+    });
+
+    container.appendChild(wrapper);
 }
 
 function resetProcessButton() {
     window.startTime = null;
     const processBtn = document.getElementById('processBtn');
     processBtn.disabled = false;
-    processBtn.textContent = 'Обработать файлы';
+    processBtn.textContent = getProcessMode() === 'reconciliation' ? 'Выполнить сверку' : 'Обработать файлы';
 }
 
 function showNotification(message, type = 'info') {

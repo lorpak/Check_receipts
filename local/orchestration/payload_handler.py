@@ -19,6 +19,20 @@ def get_dates_range(start_date: str, end_date: str):
     return dates
 
 
+def parse_thread_workers(value):
+    if isinstance(value, str):
+        value = value.strip().lower()
+    if value in (None, "", "auto"):
+        return None
+    try:
+        workers = int(value)
+    except Exception:
+        return None
+    if workers < 1:
+        return None
+    return min(workers, 64)
+
+
 def process_payload(payload: dict, status_file: str | None = None):
     try:
         data = payload or {}
@@ -31,6 +45,8 @@ def process_payload(payload: dict, status_file: str | None = None):
         start_date = data.get("start_date")
         end_date = data.get("end_date")
         event_type = data.get("event_type", "all")
+        mode = (data.get("mode") or "errors").strip().lower()
+        thread_workers = parse_thread_workers(data.get("thread_workers", data.get("workers")))
 
         source_entries = parse_source_entries(source_folder, source_paths)
         source_entries = expand_creditline_sources(source_entries)
@@ -88,6 +104,8 @@ def process_payload(payload: dict, status_file: str | None = None):
             reports_folder,
             responses_folder,
             status_file=status_file,
+            thread_workers=thread_workers,
+            mode=mode,
         )
 
     except Exception as e:

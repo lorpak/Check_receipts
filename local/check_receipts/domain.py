@@ -1,7 +1,9 @@
 # Этот файл содержит доменную логику: индексацию XML, извлечение ошибок, pairing и параллельную обработку.
 import concurrent.futures
 import os
+import re
 from collections import defaultdict
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
@@ -19,6 +21,14 @@ from .core import (
     get_cached_xml,
     now_s,
 )
+
+
+@dataclass
+class PairScanResult:
+    pairs: List[Tuple[str, str]] = field(default_factory=list)
+    reports_without_response: List[str] = field(default_factory=list)
+    responses_without_report: List[str] = field(default_factory=list)
+    duplicate_responses: List[str] = field(default_factory=list)
 
 
 def detect_group_type(main_fch_path: str) -> str:
@@ -344,11 +354,117 @@ class ErrorReceiptProcessor(MainFileIndexer):
         return self._extract_errors_actual(xml_path)
 
 
-def find_file_pairs_between_dirs(reports_dir: str, responses_dir: str) -> List[Tuple[str, str]]:
-    pairs: List[Tuple[str, str]] = []
+def is_supported_report_name(file_name: str) -> bool:
+    name_u = (file_name or "").upper()
+    if not (
+        name_u.startswith("0XY_FCH")
+        or name_u.startswith("BD0")
+        or name_u.startswith("CHP")
+        or name_u.startswith("CHT_")
+    ):
+        return False
+    if name_u.startswith("0XY_FCH") and ".XML." in name_u:
+        return False
+    return True
+
+
+def is_supported_response_name(file_name: str) -> bool:
+    name_u = (file_name or "").upper()
+    return ".XML." in name_u or "TICKET2" in name_u or "T" in name_u or name_u.endswith(".XML")
+
+
+def _build_response_indexes(response_files: List[str]):
+    fch_prefix_index: Dict[str, str] = {}
+    bd0_key_index: Dict[str, str] = {}
+    chp_key_index: Dict[str, str] = {}
+    cht_key_index: Dict[str, str] = {}
+    bd0_candidates: List[Tuple[str, str]] = []
+    chp_candidates: List[Tuple[str, str]] = []
+    cht_candidates: List[Tuple[str, str]] = []
+    duplicate_responses: List[str] = []
+
+    def _put_first(index: Dict[str, str], key: str, response_name: str) -> None:
+        if not key:
+            return
+        if key not in index:
+            index[key] = response_name
+        else:
+            duplicate_responses.append(response_name)
+
+    for response_name in response_files:
+        response_u = response_name.upper()
+        response_no_ext_u = os.path.splitext(response_name)[0].upper()
+
+        if ".XML." in response_u:
+            fch_prefix = response_u.split(".XML.", 1)[0]
+            _put_first(fch_prefix_index, fch_prefix, response_name)
+        if "TICKET2" in response_u:
+            bd0_candidates.append((response_name, response_u))
+            bd0_key = response_no_ext_u
+            if bd0_key.endswith("_TICKET2"):
+                bd0_key = bd0_key[: -len("_TICKET2")]
+            _put_first(bd0_key_index, bd0_key, response_name)
+        if "T" in response_u:
+            chp_candidates.append((response_name, response_u))
+            chp_key = re.sub(r"-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}$", "", response_no_ext_u)
+            _put_first(chp_key_index, chp_key, response_name)
+        if response_u.endswith(".XML"):
+            cht_candidates.append((response_name, response_u))
+            _put_first(cht_key_index, response_no_ext_u, response_name)
+
+    return {
+        "fch_prefix_index": fch_prefix_index,
+        "bd0_key_index": bd0_key_index,
+        "chp_key_index": chp_key_index,
+        "cht_key_index": cht_key_index,
+        "bd0_candidates": bd0_candidates,
+        "chp_candidates": chp_candidates,
+        "cht_candidates": cht_candidates,
+        "duplicate_responses": duplicate_responses,
+    }
+
+
+def _find_response_name_for_report(main_file: str, indexes: Dict) -> Optional[str]:
+    main_name_u = main_file.upper()
+    main_no_ext = os.path.splitext(main_file)[0]
+    main_no_ext_u = main_no_ext.upper()
+
+    if main_name_u.startswith("0XY_FCH"):
+        return indexes["fch_prefix_index"].get(main_no_ext_u)
+    if main_name_u.startswith("BD0"):
+        found_response = indexes["bd0_key_index"].get(main_no_ext_u)
+        if found_response is None:
+            for rf, rf_u in indexes["bd0_candidates"]:
+                if main_no_ext_u in rf_u:
+                    found_response = rf
+                    break
+        return found_response
+    if main_name_u.startswith("CHP"):
+        found_response = indexes["chp_key_index"].get(main_no_ext_u)
+        if found_response is None:
+            for rf, rf_u in indexes["chp_candidates"]:
+                if main_no_ext_u in rf_u:
+                    found_response = rf
+                    break
+        return found_response
+    if main_name_u.startswith("CHT_"):
+        found_response = indexes["cht_key_index"].get(main_no_ext_u)
+        if found_response is None:
+            for rf, rf_u in indexes["cht_candidates"]:
+                if rf_u.startswith(main_no_ext_u) and rf_u.endswith(".XML"):
+                    found_response = rf
+                    break
+        return found_response
+    return None
+
+
+def scan_report_response_matches(
+    reports_dir: str, responses_dir: str, include_unmatched_responses: bool = False
+) -> PairScanResult:
+    result = PairScanResult()
     if not os.path.isdir(reports_dir) or not os.path.isdir(responses_dir):
         print(f"[WARN] Missing directory: reports='{reports_dir}', responses='{responses_dir}'")
-        return pairs
+        return result
 
     print(f"[SCAN] Start: reports='{reports_dir}', responses='{responses_dir}'")
     try:
@@ -356,69 +472,39 @@ def find_file_pairs_between_dirs(reports_dir: str, responses_dir: str) -> List[T
         response_files = os.listdir(responses_dir)
     except Exception as e:
         print(f"[ERROR] Failed to read directories: {e}")
-        return pairs
+        return result
     print(f"[SCAN] Files in reports={len(report_files)}, responses={len(response_files)}")
 
-    fch_prefix_index: Dict[str, str] = {}
-    bd0_candidates: List[Tuple[str, str]] = []
-    chp_candidates: List[Tuple[str, str]] = []
-    cht_candidates: List[Tuple[str, str]] = []
-    for response_name in response_files:
-        response_u = response_name.upper()
-
-        if ".XML." in response_u:
-            fch_prefix = response_u.split(".XML.", 1)[0]
-            if fch_prefix not in fch_prefix_index:
-                fch_prefix_index[fch_prefix] = response_name
-        if "TICKET2" in response_u:
-            bd0_candidates.append((response_name, response_u))
-        if "T" in response_u:
-            chp_candidates.append((response_name, response_u))
-        if response_u.endswith(".XML"):
-            cht_candidates.append((response_name, response_u))
+    indexes = _build_response_indexes(response_files)
+    result.duplicate_responses.extend(indexes["duplicate_responses"])
+    used_response_names = set()
 
     for main_file in report_files:
-        main_name_u = main_file.upper()
-        if not (
-            main_name_u.startswith("0XY_FCH")
-            or main_name_u.startswith("BD0")
-            or main_name_u.startswith("CHP")
-            or main_name_u.startswith("CHT_")
-        ):
+        if not is_supported_report_name(main_file):
             continue
-        if main_name_u.startswith("0XY_FCH") and ".XML." in main_name_u:
-            continue
-
-        main_no_ext = os.path.splitext(main_file)[0]
-        main_no_ext_u = main_no_ext.upper()
-        found_response = None
-
-        if main_name_u.startswith("0XY_FCH"):
-            found_response = fch_prefix_index.get(main_no_ext_u)
-        elif main_name_u.startswith("BD0"):
-            for rf, rf_u in bd0_candidates:
-                if main_no_ext_u in rf_u:
-                    found_response = rf
-                    break
-        elif main_name_u.startswith("CHP"):
-            for rf, rf_u in chp_candidates:
-                if main_no_ext_u in rf_u:
-                    found_response = rf
-                    break
-        elif main_name_u.startswith("CHT_"):
-            for rf, rf_u in cht_candidates:
-                if rf_u.startswith(main_no_ext_u) and rf_u.endswith(".XML"):
-                    found_response = rf
-                    break
+        found_response = _find_response_name_for_report(main_file, indexes)
 
         if found_response:
-            pairs.append((os.path.join(reports_dir, main_file), os.path.join(responses_dir, found_response)))
+            result.pairs.append((os.path.join(reports_dir, main_file), os.path.join(responses_dir, found_response)))
+            used_response_names.add(found_response)
             print(f"[PAIR] {main_file} -> {found_response}")
         else:
+            result.reports_without_response.append(os.path.join(reports_dir, main_file))
             print(f"[WARN] Response not found for {main_file} in {responses_dir}")
 
-    print(f"[SCAN] Pairs found in {reports_dir}: {len(pairs)}")
-    return pairs
+    if include_unmatched_responses:
+        for response_name in response_files:
+            if response_name in used_response_names:
+                continue
+            if is_supported_response_name(response_name):
+                result.responses_without_report.append(os.path.join(responses_dir, response_name))
+
+    print(f"[SCAN] Pairs found in {reports_dir}: {len(result.pairs)}")
+    return result
+
+
+def find_file_pairs_between_dirs(reports_dir: str, responses_dir: str) -> List[Tuple[str, str]]:
+    return scan_report_response_matches(reports_dir, responses_dir).pairs
 
 
 def _find_existing_subdir(base_dir: str, candidates: List[str]) -> Optional[str]:
@@ -581,31 +667,56 @@ def process_pairs_parallel_optimized(
     progress_callback=None,
     start_progress=0,
     end_progress=100,
+    thread_workers: Optional[int] = None,
+    timers: Optional[Dict[str, float]] = None,
+    timer_prefix: str = "threadpool",
 ) -> Dict[str, List[Tuple[List[Dict], Dict]]]:
-    print(f"[OPT PROC] ThreadPool: processing {len(file_pairs)} pairs for '{group_type}'")
+    total_start = now_s()
+
+    def set_timer(name: str, started_at: float) -> None:
+        if timers is not None:
+            timers[f"{timer_prefix}.{name}"] = now_s() - started_at
+
+    auto_workers = min(16, max(2, (os.cpu_count() or 2) * 2))
+    max_workers = auto_workers
+    if thread_workers is not None:
+        try:
+            max_workers = max(1, min(64, int(thread_workers)))
+        except Exception:
+            max_workers = auto_workers
+
+    print(f"[OPT PROC] ThreadPool: workers={max_workers} processing {len(file_pairs)} pairs for '{group_type}'")
     if progress_callback:
         progress_callback(start_progress, f"Processing {group_type}")
 
+    group_start = now_s()
     per_main: Dict[str, List[str]] = {}
     for main_file, response_file in file_pairs:
         per_main.setdefault(main_file, []).append(response_file)
+    set_timer("group_pairs_s", group_start)
 
+    index_start = now_s()
     processors: Dict[str, ErrorReceiptProcessor] = {}
     for main_file in per_main.keys():
         file_type = detect_file_type(main_file)
         processors[main_file] = ErrorReceiptProcessor({file_type: main_file} if file_type else {}, group_type)
+    set_timer("build_processors_s", index_start)
 
     results_by_date = defaultdict(list)
-    max_workers = min(16, max(2, (os.cpu_count() or 2) * 2))
     total_tasks = sum(len(v) for v in per_main.values()) or 1
     completed = 0
+    worker_extract_sum = 0.0
+    worker_errors = 0
 
     def _process_single(main_file: str, response_file: str):
         nonlocal completed
+        task_start = now_s()
         proc = processors.get(main_file)
-        res = []
+        res = None
+        errors_count = 0
         try:
             errors = proc.extract_error_data_fast(response_file)
+            errors_count = len(errors or [])
             if errors:
                 file_type = detect_file_type(main_file)
                 file_date = (
@@ -621,21 +732,40 @@ def process_pairs_parallel_optimized(
             if progress_callback:
                 progress = start_progress + int((end_progress - start_progress) * (completed / total_tasks))
                 progress_callback(progress, f"Processed {completed}/{total_tasks}")
-        return res
+        return res, now_s() - task_start, errors_count
 
+    extract_wall_start = now_s()
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+        submit_start = now_s()
         futures = []
         for main_file, responses in per_main.items():
             for resp in responses:
                 futures.append(ex.submit(_process_single, main_file, resp))
+        set_timer("submit_tasks_s", submit_start)
+
+        collect_start = now_s()
         for fut in concurrent.futures.as_completed(futures):
             try:
-                r = fut.result()
+                r, task_elapsed, errors_count = fut.result()
+                worker_extract_sum += task_elapsed
+                worker_errors += errors_count
                 if r:
                     date, val = r
                     results_by_date[date].append(val)
             except Exception as e:
                 print(f"[FUTURE ERR] {e}")
+        set_timer("collect_results_s", collect_start)
+    if timers is not None:
+        timers[f"{timer_prefix}.extract_wall_s"] = now_s() - extract_wall_start
+        timers[f"{timer_prefix}.extract_worker_sum_s"] = worker_extract_sum
+        timers[f"{timer_prefix}.avg_task_s"] = worker_extract_sum / total_tasks if total_tasks else 0.0
 
+    memory_start = now_s()
     check_memory_limit()
+    set_timer("memory_check_s", memory_start)
+    set_timer("total_s", total_start)
+    print(
+        f"[TIMERS][{group_type}] threadpool total={fmt_dt(now_s() - total_start)}, "
+        f"worker_sum={fmt_dt(worker_extract_sum)}, errors={worker_errors}"
+    )
     return results_by_date

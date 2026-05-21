@@ -35,8 +35,11 @@
       "resources": [
         "../app.py",
         "../check_receipts/**",
+        "../check_receipts/**/*",
         "../orchestration/**",
-        "../resources/python/**"
+        "../orchestration/**/*",
+        "../resources/python/**",
+        "../resources/python/**/*"
       ]
     },
     "allowlist": {
