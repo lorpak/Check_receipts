@@ -1,0 +1,55 @@
+{
+  "build": {
+    "beforeBuildCommand": "",
+    "beforeDevCommand": "python -m http.server 4173 -d web",
+    "devPath": "http://127.0.0.1:4173/index.html?v=20260308",
+    "distDir": "../web",
+    "withGlobalTauri": true
+  },
+  "package": {
+    "productName": "CheckReceipts",
+    "version": "0.1.0"
+  },
+  "tauri": {
+    "security": {
+      "csp": null,
+      "dangerousRemoteDomainIpcAccess": [
+        { "domain": "127.0.0.1:4173", "windows": ["main"] },
+        { "domain": "localhost:4173", "windows": ["main"] }
+      ]
+    },
+    "windows": [
+      {
+        "title": "CheckReceipts",
+        "width": 1200,
+        "height": 800,
+        "resizable": true
+      }
+    ],
+    "bundle": {
+      "active": true,
+      "identifier": "com.check.receipts",
+      "icon": [
+        "icons/icon.ico"
+      ],
+      "resources": [
+        "../app.py",
+        "../check_receipts/**/*",
+        "../orchestration/**/*",
+        "../resources/python/**/*"
+      ]
+    },
+    "allowlist": {
+      "dialog": {
+        "open": true
+      },
+      "fs": {
+        "readFile": true,
+        "scope": [
+          "$HOME/**"
+        ]
+      }
+    }
+  }
+}
+

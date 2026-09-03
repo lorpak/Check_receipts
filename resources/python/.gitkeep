@@ -1,0 +1,1 @@
+Required so Tauri can validate the ignored runtime resource path in dev builds.

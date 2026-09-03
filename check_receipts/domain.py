@@ -1,0 +1,771 @@
+# Этот файл содержит доменную логику: индексацию XML, извлечение ошибок, pairing и параллельную обработку.
+import concurrent.futures
+import os
+import re
+from collections import defaultdict
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Dict, List, Optional, Tuple
+
+from .core import (
+    BKI_MAPPING,
+    DAILY_GROUP_LABEL,
+    MAIN_FILE_CACHE,
+    MAX_PROCESSES,
+    REPORTS_CANDIDATES,
+    RESPONSES_CANDIDATES,
+    check_memory_limit,
+    detect_file_type,
+    extract_date_from_filename,
+    fmt_dt,
+    get_cached_xml,
+    now_s,
+)
+
+
+@dataclass
+class PairScanResult:
+    pairs: List[Tuple[str, str]] = field(default_factory=list)
+    reports_without_response: List[str] = field(default_factory=list)
+    responses_without_report: List[str] = field(default_factory=list)
+    duplicate_responses: List[str] = field(default_factory=list)
+
+
+def detect_group_type(main_fch_path: str) -> str:
+    if not os.path.exists(main_fch_path):
+        return DAILY_GROUP_LABEL
+    try:
+        tree = get_cached_xml(main_fch_path)
+        if tree is None:
+            return DAILY_GROUP_LABEL
+        root = tree.getroot()
+        if root.find(".//FL_Event_3_2") is not None:
+            return "3-2"
+        try:
+            if root.xpath('.//*[local-name()="FL_Event_3_2"]'):
+                return "3-2"
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"[WARN] detect_group_type: {e}")
+    return DAILY_GROUP_LABEL
+
+
+class MainFileIndexer:
+    def __init__(self, main_files_mapping: Dict[str, str], group_type: str):
+        self.main_files_mapping = main_files_mapping or {}
+        self.group_type = group_type
+        self.main_event_by_ordernum: Dict[str, Dict[str, str]] = defaultdict(dict)
+        self.app_id_mapping: Dict[str, Dict[str, Dict]] = defaultdict(dict)
+        self.ls_mapping: Dict[str, Dict[str, str]] = defaultdict(dict)
+        self.file_dates: Dict[str, str] = defaultdict(str)
+        self.subject_info_mapping: Dict[str, Dict[str, Dict]] = defaultdict(dict)
+        self._load_cached_data()
+
+    def _load_cached_data(self):
+        cache_key = hash(tuple(sorted(self.main_files_mapping.items())))
+        if cache_key in MAIN_FILE_CACHE:
+            cached = MAIN_FILE_CACHE[cache_key]
+            self.main_event_by_ordernum = cached.get("main_event_by_ordernum", defaultdict(dict))
+            self.app_id_mapping = cached.get("app_id_mapping", defaultdict(dict))
+            self.ls_mapping = cached.get("ls_mapping", defaultdict(dict))
+            self.file_dates = cached.get("file_dates", defaultdict(str))
+            self.subject_info_mapping = cached.get("subject_info_mapping", defaultdict(dict))
+            return
+        for file_type, file_path in self.main_files_mapping.items():
+            if file_type in ["0XY_FCH", "BD0", "CHP"] and os.path.exists(file_path):
+                self._index_single_file_fast(file_path, file_type)
+        MAIN_FILE_CACHE[cache_key] = {
+            "main_event_by_ordernum": self.main_event_by_ordernum,
+            "app_id_mapping": self.app_id_mapping,
+            "ls_mapping": self.ls_mapping,
+            "file_dates": self.file_dates,
+            "subject_info_mapping": self.subject_info_mapping,
+        }
+
+    def _index_single_file_fast(self, xml_path: str, file_type: str):
+        try:
+            tree = get_cached_xml(xml_path)
+            if tree is None:
+                return
+            root = tree.getroot()
+
+            fl_packet = root.find("FL_PACKET")
+            if fl_packet is not None:
+                self.file_dates[file_type] = fl_packet.get("dateDoc", "") or self.file_dates.get(file_type, "")
+            for subject_fl in root.iterfind(".//Subject_FL"):
+                subject_uid, subject_ls, subject_appid = "", "", ""
+                subject_title = ""
+                all_order_nums = set()
+                client_info = self._extract_subject_title_info_fast(subject_fl)
+                for elem in subject_fl.iter():
+                    order_num = elem.get("orderNum")
+                    if order_num:
+                        all_order_nums.add(order_num)
+
+                    if elem.tag.startswith("FL_Event_"):
+                        uid, ls, app_info = self._extract_event_data_fast(elem)
+                        if uid and not subject_uid:
+                            subject_uid = uid
+                        if ls and not subject_ls:
+                            subject_ls = ls
+                        if app_info.get("main_app_id") and not subject_appid:
+                            subject_appid = app_info.get("main_app_id")
+                        if app_info.get("title") and not subject_title:
+                            subject_title = app_info.get("title")
+                if self.group_type == "3-2":
+                    main_3_2_event = subject_fl.find(".//FL_Event_3_2")
+                    if main_3_2_event is not None:
+                        for child_event in main_3_2_event:
+                            if child_event.tag.startswith("FL_Event_"):
+                                child_order_num = child_event.get("orderNum")
+                                if child_order_num:
+                                    _, _, child_app_info = self._extract_event_data_fast(child_event)
+                                    child_appid = child_app_info.get("main_app_id")
+                                    child_title = child_app_info.get("title", "")
+                                    if child_appid:
+                                        self.app_id_mapping[file_type][child_order_num] = {
+                                            "main_app_id": child_appid,
+                                            "ls_number": child_app_info.get("ls_number", ""),
+                                            "title": child_title,
+                                            "child_events": {},
+                                        }
+                if all_order_nums:
+                    final_app_info = {
+                        "main_app_id": subject_appid,
+                        "ls_number": subject_ls,
+                        "title": subject_title,
+                        "child_events": {},
+                    }
+                    for order_num in all_order_nums:
+                        if subject_uid:
+                            self.main_event_by_ordernum[file_type][order_num] = subject_uid
+                        if subject_ls:
+                            self.ls_mapping[file_type][order_num] = subject_ls
+                        if order_num not in self.app_id_mapping[file_type]:
+                            self.app_id_mapping[file_type][order_num] = final_app_info.copy()
+                        info = client_info.copy()
+                        if subject_title:
+                            info["title"] = subject_title
+                        self.subject_info_mapping[file_type][order_num] = info
+
+        except Exception as e:
+            print(f"[INDEX ERROR] {xml_path}: {e}")
+
+    def _extract_subject_title_info_fast(self, subject_fl_elem) -> Dict[str, str]:
+        result = {"fio": "", "doc_info": ""}
+        title_elem = subject_fl_elem.find("Title")
+        if title_elem is None:
+            return result
+        name_elem = title_elem.find(".//FL_1_Name")
+        if name_elem is not None:
+            last = name_elem.findtext("lastName", "").strip()
+            first = name_elem.findtext("firstName", "").strip()
+            middle = name_elem.findtext("middleName", "").strip()
+            result["fio"] = f"{last} {first} {middle}".strip()
+        doc_elem = title_elem.find(".//FL_4_Doc")
+        if doc_elem is not None:
+            series = doc_elem.findtext("docSeries", "").strip()
+            num = doc_elem.findtext("docNum", "").strip()
+            result["doc_info"] = f"{series} {num}".strip() if series else num
+        return result
+
+    def _extract_event_data_fast(self, event_elem):
+        deal_uid = ""
+        ls_number = ""
+        title = ""
+        app_info = {"main_app_id": "", "ls_number": "", "title": ""}
+
+        try:
+            fl_17 = event_elem.find(".//FL_17_DealUid")
+            fl_55 = event_elem.find(".//FL_55_Application")
+
+            if fl_17 is not None:
+                uid17 = (fl_17.findtext("uid") or "").strip()
+                if uid17:
+                    deal_uid = uid17
+            if not deal_uid and fl_55 is not None:
+                uid55 = (fl_55.findtext("uid") or "").strip()
+                if uid55:
+                    deal_uid = uid55
+            if fl_55 is not None:
+                num55 = (fl_55.findtext("num") or "").strip()
+                if num55:
+                    app_info["main_app_id"] = num55
+            if fl_17 is not None:
+                num17 = (fl_17.findtext("num") or "").strip()
+                if num17:
+                    if "/" in num17:
+                        left, right = [p.strip() for p in num17.split("/", 1)]
+                        if left:
+                            title = left
+                        if right and not app_info["main_app_id"]:
+                            app_info["main_app_id"] = right
+                        if left and left.replace(" ", "").isdigit():
+                            ls_number = left
+                    else:
+                        if app_info["main_app_id"]:
+                            title = num17
+                        else:
+                            if num17.isdigit() and len(num17) >= 4:
+                                app_info["main_app_id"] = num17
+                            else:
+                                title = num17
+
+            if not ls_number and title and title.replace(" ", "").isdigit():
+                ls_number = title
+
+            app_info["ls_number"] = ls_number
+            app_info["title"] = title
+        except Exception:
+            pass
+
+        return deal_uid, (ls_number or title), app_info
+
+
+class ErrorReceiptProcessor(MainFileIndexer):
+    ERROR_FIELDS = {
+        "ErrorCode": {"xpath": "errorCode"},
+        "ErrorMessage": {"xpath": "errorMessage"},
+        "Uid": {"xpath": "uid"},
+        "OrderNum": {"xpath": "orderNum"},
+        "OrderNum_3_2": {"xpath": "orderNum_3_2"},
+        "EventName": {"xpath": "eventName"},
+        "BlockName": {"xpath": "blockName"},
+        "FieldName": {"xpath": "fieldName"},
+        "FieldValue": {"xpath": "fieldValue"},
+    }
+
+    def _extract_errors_actual(self, xml_path: str) -> List[Dict]:
+        try:
+            tree = get_cached_xml(xml_path)
+            if tree is None:
+                return []
+            root = tree.getroot()
+            filename = os.path.basename(xml_path)
+
+            file_type = detect_file_type(filename)
+
+            main_filename = os.path.basename(self.main_files_mapping.get(file_type, "") or "")
+            file_date = self.file_dates.get(file_type, "") or extract_date_from_filename(
+                os.path.basename(main_filename) or filename
+            )
+
+            def read_text(node, tag_name: str) -> str:
+                value = (node.findtext(tag_name) or "").strip()
+                if value:
+                    return value
+                try:
+                    found = node.xpath("./*[local-name()='" + tag_name + "']/text()")
+                    if found:
+                        return (found[0] or "").strip()
+                except Exception:
+                    pass
+                return ""
+
+            incoming_doc_date = (root.findtext(".//incomingDocDate") or "").strip()
+            if not incoming_doc_date:
+                try:
+                    found = root.xpath(".//*[local-name()='incomingDocDate']/text()")
+                    if found:
+                        incoming_doc_date = (found[0] or "").strip()
+                except Exception:
+                    pass
+
+            common_data = {
+                "FileName": main_filename,
+                "FileDate": file_date,
+                "IncomingDocNumber": filename,
+                "IncomingDocDate": incoming_doc_date,
+                "BKI": BKI_MAPPING.get(file_type, ""),
+            }
+
+            error_nodes = list(root.iterfind(".//Error"))
+            if not error_nodes:
+                try:
+                    error_nodes = list(root.xpath(".//*[local-name()='Error']"))
+                except Exception:
+                    error_nodes = []
+
+            errors: List[Dict] = []
+            for error in error_nodes:
+                error_message = read_text(error, "errorMessage")
+
+                order_num = read_text(error, "orderNum")
+                if not order_num:
+                    order_num = (error.get("orderNum") or "").strip()
+                if not order_num:
+                    order_num = read_text(error, "OrderNum")
+
+                order_num_3_2 = ""
+                if self.group_type == "3-2":
+                    order_num_3_2 = read_text(error, "orderNum_3_2")
+                    if not order_num_3_2:
+                        order_num_3_2 = (error.get("orderNum_3_2") or "").strip()
+                    if not order_num_3_2:
+                        order_num_3_2 = read_text(error, "orderNum3_2") or read_text(error, "orderNum3.2")
+
+                uid = self.main_event_by_ordernum.get(file_type, {}).get(order_num, "")
+                ls_number = self.ls_mapping.get(file_type, {}).get(order_num, "")
+                subject_info = self.subject_info_mapping.get(file_type, {}).get(order_num, {}) or {}
+                fio = subject_info.get("fio", "") or ""
+                doc = subject_info.get("doc_info", "") or ""
+
+                appid = ""
+                event_info = self.app_id_mapping.get(file_type, {}).get(order_num)
+                if event_info:
+                    appid = event_info.get("main_app_id", "") or ""
+                if not appid and self.group_type == "3-2" and order_num_3_2:
+                    child_info = self.app_id_mapping.get(file_type, {}).get(order_num_3_2)
+                    appid = (child_info.get("main_app_id") if child_info else "") or ""
+
+                title_val = ""
+                if event_info and isinstance(event_info, dict):
+                    title_val = event_info.get("title", "") or ""
+                if not title_val:
+                    title_val = subject_info.get("title", "") or ""
+                if not title_val:
+                    title_val = ls_number or ""
+
+                err_row = {
+                    "FIO": fio,
+                    "Doc": doc,
+                    "Title": title_val,
+                    "AppId": appid,
+                    "Uid": uid,
+                    "OrderNum": order_num,
+                    "OrderNum_3_2": order_num_3_2 if self.group_type == "3-2" else "",
+                    "EventName": read_text(error, "eventName"),
+                    "BlockName": read_text(error, "blockName"),
+                    "FieldName": read_text(error, "fieldName"),
+                    "FieldValue": read_text(error, "fieldValue"),
+                    "ErrorCode": read_text(error, "errorCode"),
+                    "ErrorMessage": error_message,
+                    "EventNum": read_text(error, "eventNum"),
+                }
+                err_row.update(common_data)
+                errors.append(err_row)
+            return errors
+        except Exception as e:
+            print(f"[EXTRACT ERR] {xml_path}: {e}")
+            return []
+
+    def extract_error_data_fast(self, xml_path: str) -> List[Dict]:
+        return self._extract_errors_actual(xml_path)
+
+
+def is_supported_report_name(file_name: str) -> bool:
+    name_u = (file_name or "").upper()
+    if not (
+        name_u.startswith("0XY_FCH")
+        or name_u.startswith("BD0")
+        or name_u.startswith("CHP")
+        or name_u.startswith("CHT_")
+    ):
+        return False
+    if name_u.startswith("0XY_FCH") and ".XML." in name_u:
+        return False
+    return True
+
+
+def is_supported_response_name(file_name: str) -> bool:
+    name_u = (file_name or "").upper()
+    return ".XML." in name_u or "TICKET2" in name_u or "T" in name_u or name_u.endswith(".XML")
+
+
+def _build_response_indexes(response_files: List[str]):
+    fch_prefix_index: Dict[str, str] = {}
+    bd0_key_index: Dict[str, str] = {}
+    chp_key_index: Dict[str, str] = {}
+    cht_key_index: Dict[str, str] = {}
+    bd0_candidates: List[Tuple[str, str]] = []
+    chp_candidates: List[Tuple[str, str]] = []
+    cht_candidates: List[Tuple[str, str]] = []
+    duplicate_responses: List[str] = []
+
+    def _put_first(index: Dict[str, str], key: str, response_name: str) -> None:
+        if not key:
+            return
+        if key not in index:
+            index[key] = response_name
+        else:
+            duplicate_responses.append(response_name)
+
+    for response_name in response_files:
+        response_u = response_name.upper()
+        response_no_ext_u = os.path.splitext(response_name)[0].upper()
+
+        if ".XML." in response_u:
+            fch_prefix = response_u.split(".XML.", 1)[0]
+            _put_first(fch_prefix_index, fch_prefix, response_name)
+        if "TICKET2" in response_u:
+            bd0_candidates.append((response_name, response_u))
+            bd0_key = response_no_ext_u
+            if bd0_key.endswith("_TICKET2"):
+                bd0_key = bd0_key[: -len("_TICKET2")]
+            _put_first(bd0_key_index, bd0_key, response_name)
+        if "T" in response_u:
+            chp_candidates.append((response_name, response_u))
+            chp_key = re.sub(r"-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}$", "", response_no_ext_u)
+            _put_first(chp_key_index, chp_key, response_name)
+        if response_u.endswith(".XML"):
+            cht_candidates.append((response_name, response_u))
+            _put_first(cht_key_index, response_no_ext_u, response_name)
+
+    return {
+        "fch_prefix_index": fch_prefix_index,
+        "bd0_key_index": bd0_key_index,
+        "chp_key_index": chp_key_index,
+        "cht_key_index": cht_key_index,
+        "bd0_candidates": bd0_candidates,
+        "chp_candidates": chp_candidates,
+        "cht_candidates": cht_candidates,
+        "duplicate_responses": duplicate_responses,
+    }
+
+
+def _find_response_name_for_report(main_file: str, indexes: Dict) -> Optional[str]:
+    main_name_u = main_file.upper()
+    main_no_ext = os.path.splitext(main_file)[0]
+    main_no_ext_u = main_no_ext.upper()
+
+    if main_name_u.startswith("0XY_FCH"):
+        return indexes["fch_prefix_index"].get(main_no_ext_u)
+    if main_name_u.startswith("BD0"):
+        found_response = indexes["bd0_key_index"].get(main_no_ext_u)
+        if found_response is None:
+            for rf, rf_u in indexes["bd0_candidates"]:
+                if main_no_ext_u in rf_u:
+                    found_response = rf
+                    break
+        return found_response
+    if main_name_u.startswith("CHP"):
+        found_response = indexes["chp_key_index"].get(main_no_ext_u)
+        if found_response is None:
+            for rf, rf_u in indexes["chp_candidates"]:
+                if main_no_ext_u in rf_u:
+                    found_response = rf
+                    break
+        return found_response
+    if main_name_u.startswith("CHT_"):
+        found_response = indexes["cht_key_index"].get(main_no_ext_u)
+        if found_response is None:
+            for rf, rf_u in indexes["cht_candidates"]:
+                if rf_u.startswith(main_no_ext_u) and rf_u.endswith(".XML"):
+                    found_response = rf
+                    break
+        return found_response
+    return None
+
+
+def scan_report_response_matches(
+    reports_dir: str, responses_dir: str, include_unmatched_responses: bool = False
+) -> PairScanResult:
+    result = PairScanResult()
+    if not os.path.isdir(reports_dir) or not os.path.isdir(responses_dir):
+        print(f"[WARN] Missing directory: reports='{reports_dir}', responses='{responses_dir}'")
+        return result
+
+    print(f"[SCAN] Start: reports='{reports_dir}', responses='{responses_dir}'")
+    try:
+        report_files = os.listdir(reports_dir)
+        response_files = os.listdir(responses_dir)
+    except Exception as e:
+        print(f"[ERROR] Failed to read directories: {e}")
+        return result
+    print(f"[SCAN] Files in reports={len(report_files)}, responses={len(response_files)}")
+
+    indexes = _build_response_indexes(response_files)
+    result.duplicate_responses.extend(indexes["duplicate_responses"])
+    used_response_names = set()
+
+    for main_file in report_files:
+        if not is_supported_report_name(main_file):
+            continue
+        found_response = _find_response_name_for_report(main_file, indexes)
+
+        if found_response:
+            result.pairs.append((os.path.join(reports_dir, main_file), os.path.join(responses_dir, found_response)))
+            used_response_names.add(found_response)
+            print(f"[PAIR] {main_file} -> {found_response}")
+        else:
+            result.reports_without_response.append(os.path.join(reports_dir, main_file))
+            print(f"[WARN] Response not found for {main_file} in {responses_dir}")
+
+    if include_unmatched_responses:
+        for response_name in response_files:
+            if response_name in used_response_names:
+                continue
+            if is_supported_response_name(response_name):
+                result.responses_without_report.append(os.path.join(responses_dir, response_name))
+
+    print(f"[SCAN] Pairs found in {reports_dir}: {len(result.pairs)}")
+    return result
+
+
+def find_file_pairs_between_dirs(reports_dir: str, responses_dir: str) -> List[Tuple[str, str]]:
+    return scan_report_response_matches(reports_dir, responses_dir).pairs
+
+
+def _find_existing_subdir(base_dir: str, candidates: List[str]) -> Optional[str]:
+    if not base_dir or not os.path.isdir(base_dir):
+        return None
+
+    candidate_set = {c.lower() for c in candidates}
+    try:
+        entries = [e for e in os.listdir(base_dir)]
+    except Exception:
+        return None
+    for name in entries:
+        full_path = os.path.join(base_dir, name)
+        if os.path.isdir(full_path) and name.lower() in candidate_set:
+            return full_path
+    for name in entries:
+        full_path = os.path.join(base_dir, name)
+        if not os.path.isdir(full_path):
+            continue
+        low_name = name.lower()
+        for token in candidate_set:
+            if token and token in low_name:
+                return full_path
+    return None
+
+
+def _resolve_input_dirs(
+    local_folder_path: str, reports_folder: Optional[str], responses_folder: Optional[str]
+) -> Tuple[str, str]:
+    if reports_folder or responses_folder:
+        if not reports_folder or not responses_folder:
+            raise ValueError("For split mode provide both folders: reports_folder and responses_folder.")
+        if not os.path.isdir(reports_folder):
+            raise ValueError(f"Reports folder does not exist: {reports_folder}")
+        if not os.path.isdir(responses_folder):
+            raise ValueError(f"Responses folder does not exist: {responses_folder}")
+        return reports_folder, responses_folder
+
+    if not local_folder_path or not os.path.isdir(local_folder_path):
+        raise ValueError(f"Input folder does not exist: {local_folder_path}")
+
+    def _name_has_any_token(path: str, tokens: List[str]) -> bool:
+        name = os.path.basename(os.path.normpath(path)).lower()
+        return any(token and token in name for token in tokens)
+
+    auto_reports = _find_existing_subdir(local_folder_path, REPORTS_CANDIDATES)
+    auto_responses = _find_existing_subdir(local_folder_path, RESPONSES_CANDIDATES)
+    if auto_reports and auto_responses:
+        return auto_reports, auto_responses
+    parent_dir = os.path.dirname(local_folder_path)
+    if parent_dir and os.path.isdir(parent_dir):
+        parent_reports = _find_existing_subdir(parent_dir, REPORTS_CANDIDATES)
+        parent_responses = _find_existing_subdir(parent_dir, RESPONSES_CANDIDATES)
+
+        if _name_has_any_token(local_folder_path, REPORTS_CANDIDATES):
+            return local_folder_path, (parent_responses or local_folder_path)
+        if _name_has_any_token(local_folder_path, RESPONSES_CANDIDATES):
+            return (parent_reports or local_folder_path), local_folder_path
+        if parent_reports and parent_responses:
+            return parent_reports, parent_responses
+
+    return local_folder_path, local_folder_path
+
+
+def worker_process_main(args):
+    main_file, response_files, group_type = args
+    t0 = now_s()
+    profiling = {"index_time": 0.0, "total_resp_time": 0.0, "responses": 0, "errors": 0}
+    results = []
+
+    file_type = detect_file_type(main_file)
+    t_idx_start = now_s()
+    try:
+        mapping = {file_type: main_file} if file_type else {}
+        proc = ErrorReceiptProcessor(mapping, group_type)
+    except Exception as e:
+        print(f"[WORKER ERROR] Failed to build processor for {main_file}: {e}")
+        proc = ErrorReceiptProcessor({}, group_type)
+    t_idx_end = now_s()
+    profiling["index_time"] = t_idx_end - t_idx_start
+    for resp in response_files:
+        t_r0 = now_s()
+        profiling["responses"] += 1
+        try:
+            errors = proc.extract_error_data_fast(resp)
+            t_r1 = now_s()
+            profiling["total_resp_time"] += t_r1 - t_r0
+            if errors:
+                profiling["errors"] += len(errors)
+                file_date = (
+                    proc.file_dates.get(file_type, "")
+                    or extract_date_from_filename(os.path.basename(main_file))
+                    or datetime.now().strftime("%Y-%m-%d")
+                )
+                results.append(
+                    {"file_date": file_date, "errors": errors, "response_file": resp, "main_file": main_file}
+                )
+        except Exception as e:
+            t_r1 = now_s()
+            profiling["total_resp_time"] += t_r1 - t_r0
+            print(f"[WORKER TASK ERROR] {resp}: {e}")
+
+    total_t = now_s() - t0
+    profile_summary = {
+        "index_time": profiling["index_time"],
+        "total_resp_time": profiling["total_resp_time"],
+        "responses": profiling["responses"],
+        "errors": profiling["errors"],
+        "total_time": total_t,
+    }
+    return {"main_file": main_file, "file_type": file_type, "profile": profile_summary, "results": results}
+
+
+def process_pairs_processpool(file_pairs: List[Tuple[str, str]], group_type: str, max_workers: int = MAX_PROCESSES):
+    print(f"[PROCESSPOOL] Starting mode with max_workers={max_workers} for {len(file_pairs)} pairs ({group_type})")
+    per_main: Dict[str, List[str]] = {}
+    for main_file, resp in file_pairs:
+        per_main.setdefault(main_file, []).append(resp)
+
+    tasks = []
+    for main, responses in per_main.items():
+        tasks.append((main, responses, group_type))
+
+    results_by_date: Dict[str, List[Tuple[List[Dict], Dict]]] = defaultdict(list)
+    profiles = []
+    try:
+        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as ex:
+            futures = {ex.submit(worker_process_main, task): task[0] for task in tasks}
+            for fut in concurrent.futures.as_completed(futures):
+                try:
+                    r = fut.result()
+                except Exception as e:
+                    print(f"[PROCESSPOOL FUTURE ERR] {e}")
+                    continue
+                profiles.append({"main_file": r.get("main_file"), "profile": r.get("profile", {})})
+                for item in r.get("results", []):
+                    fd = item.get("file_date") or extract_date_from_filename(os.path.basename(item.get("main_file", "")))
+                    errors = item.get("errors", [])
+                    meta = {"main_file": item.get("main_file"), "response_file": item.get("response_file")}
+                    results_by_date[fd].append((errors, meta))
+    except Exception as e:
+        print(f"[PROCESSPOOL LAUNCH ERROR] {e}")
+        print("[FALLBACK] Switching to ThreadPoolExecutor fallback.")
+        return process_pairs_parallel_optimized(file_pairs, group_type)
+    total_index = sum(p["profile"].get("index_time", 0.0) for p in profiles)
+    total_resp = sum(p["profile"].get("total_resp_time", 0.0) for p in profiles)
+    total_errors = sum(p["profile"].get("errors", 0) for p in profiles)
+    total_responses = sum(p["profile"].get("responses", 0) for p in profiles)
+    print(f"[PROFILE SUMMARY] main_files={len(profiles)}, responses={total_responses}, errors={total_errors}")
+    print(
+        f"  total_index_time={fmt_dt(total_index)}, total_resp_time={fmt_dt(total_resp)}, "
+        f"avg_resp_time={(total_resp / total_responses) if total_responses else 0:.3f}s"
+    )
+    return results_by_date
+
+
+def process_pairs_parallel_optimized(
+    file_pairs: List[Tuple[str, str]],
+    group_type: str,
+    progress_callback=None,
+    start_progress=0,
+    end_progress=100,
+    thread_workers: Optional[int] = None,
+    timers: Optional[Dict[str, float]] = None,
+    timer_prefix: str = "threadpool",
+) -> Dict[str, List[Tuple[List[Dict], Dict]]]:
+    total_start = now_s()
+
+    def set_timer(name: str, started_at: float) -> None:
+        if timers is not None:
+            timers[f"{timer_prefix}.{name}"] = now_s() - started_at
+
+    auto_workers = min(16, max(2, (os.cpu_count() or 2) * 2))
+    max_workers = auto_workers
+    if thread_workers is not None:
+        try:
+            max_workers = max(1, min(64, int(thread_workers)))
+        except Exception:
+            max_workers = auto_workers
+
+    print(f"[OPT PROC] ThreadPool: workers={max_workers} processing {len(file_pairs)} pairs for '{group_type}'")
+    if progress_callback:
+        progress_callback(start_progress, f"Processing {group_type}")
+
+    group_start = now_s()
+    per_main: Dict[str, List[str]] = {}
+    for main_file, response_file in file_pairs:
+        per_main.setdefault(main_file, []).append(response_file)
+    set_timer("group_pairs_s", group_start)
+
+    index_start = now_s()
+    processors: Dict[str, ErrorReceiptProcessor] = {}
+    for main_file in per_main.keys():
+        file_type = detect_file_type(main_file)
+        processors[main_file] = ErrorReceiptProcessor({file_type: main_file} if file_type else {}, group_type)
+    set_timer("build_processors_s", index_start)
+
+    results_by_date = defaultdict(list)
+    total_tasks = sum(len(v) for v in per_main.values()) or 1
+    completed = 0
+    worker_extract_sum = 0.0
+    worker_errors = 0
+
+    def _process_single(main_file: str, response_file: str):
+        nonlocal completed
+        task_start = now_s()
+        proc = processors.get(main_file)
+        res = None
+        errors_count = 0
+        try:
+            errors = proc.extract_error_data_fast(response_file)
+            errors_count = len(errors or [])
+            if errors:
+                file_type = detect_file_type(main_file)
+                file_date = (
+                    proc.file_dates.get(file_type, "")
+                    or extract_date_from_filename(os.path.basename(main_file))
+                    or datetime.now().strftime("%Y-%m-%d")
+                )
+                res = (file_date, (errors, {"main_file": main_file, "response_file": response_file}))
+        except Exception as e:
+            print(f"[TASK ERR] {os.path.basename(response_file)}: {e}")
+        finally:
+            completed += 1
+            if progress_callback:
+                progress = start_progress + int((end_progress - start_progress) * (completed / total_tasks))
+                progress_callback(progress, f"Processed {completed}/{total_tasks}")
+        return res, now_s() - task_start, errors_count
+
+    extract_wall_start = now_s()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+        submit_start = now_s()
+        futures = []
+        for main_file, responses in per_main.items():
+            for resp in responses:
+                futures.append(ex.submit(_process_single, main_file, resp))
+        set_timer("submit_tasks_s", submit_start)
+
+        collect_start = now_s()
+        for fut in concurrent.futures.as_completed(futures):
+            try:
+                r, task_elapsed, errors_count = fut.result()
+                worker_extract_sum += task_elapsed
+                worker_errors += errors_count
+                if r:
+                    date, val = r
+                    results_by_date[date].append(val)
+            except Exception as e:
+                print(f"[FUTURE ERR] {e}")
+        set_timer("collect_results_s", collect_start)
+    if timers is not None:
+        timers[f"{timer_prefix}.extract_wall_s"] = now_s() - extract_wall_start
+        timers[f"{timer_prefix}.extract_worker_sum_s"] = worker_extract_sum
+        timers[f"{timer_prefix}.avg_task_s"] = worker_extract_sum / total_tasks if total_tasks else 0.0
+
+    memory_start = now_s()
+    check_memory_limit()
+    set_timer("memory_check_s", memory_start)
+    set_timer("total_s", total_start)
+    print(
+        f"[TIMERS][{group_type}] threadpool total={fmt_dt(now_s() - total_start)}, "
+        f"worker_sum={fmt_dt(worker_extract_sum)}, errors={worker_errors}"
+    )
+    return results_by_date
